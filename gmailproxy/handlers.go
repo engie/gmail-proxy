@@ -112,21 +112,38 @@ func (p *Proxy) CreateDraft(req DraftRequest) (*DraftResult, error) {
 }
 
 
+// sanitizeHeader strips \r and \n to prevent header injection.
+func sanitizeHeader(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+}
+
 func buildRFC2822(req DraftRequest) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(req.To, ", "))
+	sanitized := make([]string, len(req.To))
+	for i, v := range req.To {
+		sanitized[i] = sanitizeHeader(v)
+	}
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(sanitized, ", "))
 	if len(req.CC) > 0 {
-		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(req.CC, ", "))
+		sanitized = make([]string, len(req.CC))
+		for i, v := range req.CC {
+			sanitized[i] = sanitizeHeader(v)
+		}
+		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(sanitized, ", "))
 	}
 	if len(req.BCC) > 0 {
-		fmt.Fprintf(&b, "Bcc: %s\r\n", strings.Join(req.BCC, ", "))
+		sanitized = make([]string, len(req.BCC))
+		for i, v := range req.BCC {
+			sanitized[i] = sanitizeHeader(v)
+		}
+		fmt.Fprintf(&b, "Bcc: %s\r\n", strings.Join(sanitized, ", "))
 	}
-	fmt.Fprintf(&b, "Subject: %s\r\n", req.Subject)
+	fmt.Fprintf(&b, "Subject: %s\r\n", sanitizeHeader(req.Subject))
 	if req.InReplyTo != "" {
-		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", req.InReplyTo)
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\n", sanitizeHeader(req.InReplyTo))
 	}
 	if req.References != "" {
-		fmt.Fprintf(&b, "References: %s\r\n", req.References)
+		fmt.Fprintf(&b, "References: %s\r\n", sanitizeHeader(req.References))
 	}
 	b.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
 	b.WriteString("\r\n")
