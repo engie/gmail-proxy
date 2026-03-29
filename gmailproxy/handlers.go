@@ -2,103 +2,71 @@ package gmailproxy
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
-	"strconv"
 	"strings"
 
 	"google.golang.org/api/gmail/v1"
 )
 
 type Proxy struct {
-	svc      *gmail.Service
-	labelID  string
+	svc     *gmail.Service
+	labelID string
 }
 
 func NewProxy(svc *gmail.Service, labelID string) *Proxy {
 	return &Proxy{svc: svc, labelID: labelID}
 }
 
-func (p *Proxy) ListMessages(w http.ResponseWriter, r *http.Request) {
-	maxResults := int64(20)
-	if v := r.URL.Query().Get("maxResults"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n <= 100 {
-			maxResults = n
-		}
+func (p *Proxy) ListMessages(maxResults int64, pageToken, query string) (*gmail.ListMessagesResponse, error) {
+	if maxResults <= 0 || maxResults > 100 {
+		maxResults = 20
 	}
 
 	call := p.svc.Users.Messages.List("me").LabelIds(p.labelID).MaxResults(maxResults)
-
-	if pt := r.URL.Query().Get("pageToken"); pt != "" {
-		call = call.PageToken(pt)
+	if pageToken != "" {
+		call = call.PageToken(pageToken)
 	}
-	if q := r.URL.Query().Get("q"); q != "" {
-		call = call.Q(q)
-	}
-
-	resp, err := call.Do()
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail list error: %v", err)
-		return
+	if query != "" {
+		call = call.Q(query)
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	return call.Do()
 }
 
-func (p *Proxy) GetMessage(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (p *Proxy) GetMessage(id, format string) (*gmail.Message, error) {
 	if id == "" {
-		writeError(w, http.StatusBadRequest, "missing message id")
-		return
+		return nil, fmt.Errorf("missing message id")
 	}
-
-	format := r.URL.Query().Get("format")
 	if format == "" {
 		format = "full"
 	}
 
 	msg, err := p.svc.Users.Messages.Get("me", id).Format(format).Do()
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail get error: %v", err)
-		return
+		return nil, fmt.Errorf("gmail get error: %w", err)
 	}
 
 	if !HasLabel(msg, p.labelID) {
-		writeError(w, http.StatusForbidden, "message not accessible")
-		return
+		return nil, fmt.Errorf("message not accessible")
 	}
 
-	writeJSON(w, http.StatusOK, msg)
+	return msg, nil
 }
 
-func (p *Proxy) GetAttachment(w http.ResponseWriter, r *http.Request) {
-	msgID := r.PathValue("id")
-	attID := r.PathValue("attachmentId")
+func (p *Proxy) GetAttachment(msgID, attID string) (*gmail.MessagePartBody, error) {
 	if msgID == "" || attID == "" {
-		writeError(w, http.StatusBadRequest, "missing message or attachment id")
-		return
+		return nil, fmt.Errorf("missing message or attachment id")
 	}
 
-	// Verify parent message has the allowed label.
 	msg, err := p.svc.Users.Messages.Get("me", msgID).Format("minimal").Do()
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail get error: %v", err)
-		return
+		return nil, fmt.Errorf("gmail get error: %w", err)
 	}
 	if !HasLabel(msg, p.labelID) {
-		writeError(w, http.StatusForbidden, "message not accessible")
-		return
+		return nil, fmt.Errorf("message not accessible")
 	}
 
-	att, err := p.svc.Users.Messages.Attachments.Get("me", msgID, attID).Do()
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail attachment error: %v", err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, att)
+	return p.svc.Users.Messages.Attachments.Get("me", msgID, attID).Do()
 }
 
 type DraftRequest struct {
@@ -112,16 +80,14 @@ type DraftRequest struct {
 	ThreadId   string   `json:"threadId,omitempty"`
 }
 
-func (p *Proxy) CreateDraft(w http.ResponseWriter, r *http.Request) {
-	var req DraftRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body: %v", err)
-		return
-	}
+type DraftResult struct {
+	ID        string `json:"id"`
+	MessageID string `json:"messageId"`
+}
 
+func (p *Proxy) CreateDraft(req DraftRequest) (*DraftResult, error) {
 	if len(req.To) == 0 {
-		writeError(w, http.StatusBadRequest, "at least one 'to' recipient required")
-		return
+		return nil, fmt.Errorf("at least one 'to' recipient required")
 	}
 
 	raw := buildRFC2822(req)
@@ -136,34 +102,32 @@ func (p *Proxy) CreateDraft(w http.ResponseWriter, r *http.Request) {
 
 	created, err := p.svc.Users.Drafts.Create("me", draft).Do()
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail draft create error: %v", err)
-		return
+		return nil, fmt.Errorf("gmail draft create error: %w", err)
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":        created.Id,
-		"messageId": created.Message.Id,
-	})
+	return &DraftResult{
+		ID:        created.Id,
+		MessageID: created.Message.Id,
+	}, nil
 }
 
-func (p *Proxy) ListLabels(w http.ResponseWriter, r *http.Request) {
+type LabelInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+func (p *Proxy) ListLabels() ([]LabelInfo, error) {
 	resp, err := p.svc.Users.Labels.List("me").Do()
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "gmail labels error: %v", err)
-		return
+		return nil, fmt.Errorf("gmail labels error: %w", err)
 	}
 
-	type label struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
-	out := make([]label, len(resp.Labels))
+	out := make([]LabelInfo, len(resp.Labels))
 	for i, l := range resp.Labels {
-		out[i] = label{ID: l.Id, Name: l.Name, Type: l.Type}
+		out[i] = LabelInfo{ID: l.Id, Name: l.Name, Type: l.Type}
 	}
-
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 func buildRFC2822(req DraftRequest) string {
@@ -186,18 +150,4 @@ func buildRFC2822(req DraftRequest) string {
 	b.WriteString("\r\n")
 	b.WriteString(req.Body)
 	return b.String()
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("error encoding response: %v", err)
-	}
-}
-
-func writeError(w http.ResponseWriter, status int, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	log.Printf("error: %s", msg)
-	writeJSON(w, status, map[string]string{"error": msg})
 }

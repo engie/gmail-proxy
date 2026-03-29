@@ -2,93 +2,179 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 
-	"github.com/stephen/gmail-proxy/auth"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/stephen/gmail-proxy/gmailproxy"
 )
 
 func main() {
-	cfg, err := loadConfig()
-	if err != nil {
-		log.Fatalf("config error: %v", err)
+	tokenJSON := requireEnv("GMAIL_TOKEN_JSON")
+	allowedLabel := requireEnv("ALLOWED_LABEL")
+	authToken := requireEnv("MCP_AUTH_TOKEN")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
 
 	ctx := context.Background()
 
-	// Initialize Gmail service.
-	gmailSvc, err := gmailproxy.NewGmailService(ctx, cfg.GmailTokenJSON)
+	gmailSvc, err := gmailproxy.NewGmailService(ctx, tokenJSON)
 	if err != nil {
 		log.Fatalf("gmail init error: %v", err)
 	}
 	log.Println("gmail service initialized")
 
-	// Resolve label name to ID.
-	labelID, err := gmailproxy.ResolveLabelID(gmailSvc, cfg.AllowedLabel)
+	labelID, err := gmailproxy.ResolveLabelID(gmailSvc, allowedLabel)
 	if err != nil {
 		log.Fatalf("label resolution error: %v", err)
 	}
-	log.Printf("resolved label %q to ID %q", cfg.AllowedLabel, labelID)
-
-	// Initialize OAuth2 auth server.
-	authServer, err := auth.New(cfg.OAuthSecret, cfg.OAuthClients)
-	if err != nil {
-		log.Fatalf("oauth init error: %v", err)
-	}
-	log.Println("oauth server initialized")
+	log.Printf("resolved label %q to ID %q", allowedLabel, labelID)
 
 	proxy := gmailproxy.NewProxy(gmailSvc, labelID)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /oauth/token", authServer.TokenHandler)
-	mux.Handle("GET /api/messages", authServer.Protect(proxy.ListMessages))
-	mux.Handle("GET /api/messages/{id}", authServer.Protect(proxy.GetMessage))
-	mux.Handle("GET /api/messages/{id}/attachments/{attachmentId}", authServer.Protect(proxy.GetAttachment))
-	mux.Handle("POST /api/drafts", authServer.Protect(proxy.CreateDraft))
-	mux.Handle("GET /api/labels", authServer.Protect(proxy.ListLabels))
+	mcpServer := server.NewMCPServer(
+		"gmail-proxy",
+		"1.0.0",
+		server.WithToolCapabilities(true),
+	)
 
-	addr := ":" + cfg.Port
-	log.Printf("starting gmail proxy on %s", addr)
+	registerTools(mcpServer, proxy)
+
+	httpServer := server.NewStreamableHTTPServer(mcpServer, server.WithStateLess(true))
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", bearerAuth(authToken, httpServer))
+
+	addr := ":" + port
+	log.Printf("starting gmail MCP server on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
 
-type config struct {
-	GmailTokenJSON string
-	OAuthSecret    string
-	OAuthClients   string
-	AllowedLabel   string
-	Port           string
+func registerTools(s *server.MCPServer, proxy *gmailproxy.Proxy) {
+	s.AddTool(mcp.NewTool("list_messages",
+		mcp.WithDescription("List emails that have the allowed label. Returns message IDs and thread IDs; use get_message to fetch full content."),
+		mcp.WithNumber("maxResults", mcp.Description("Max messages to return (1-100, default 20)")),
+		mcp.WithString("pageToken", mcp.Description("Page token for pagination")),
+		mcp.WithString("q", mcp.Description("Gmail search query to further filter results")),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		maxResults := int64(req.GetInt("maxResults", 20))
+		pageToken := req.GetString("pageToken", "")
+		query := req.GetString("q", "")
+
+		resp, err := proxy.ListMessages(maxResults, pageToken, query)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(resp)
+	})
+
+	s.AddTool(mcp.NewTool("get_message",
+		mcp.WithDescription("Get a single email by ID. Only accessible if the message has the allowed label."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Message ID")),
+		mcp.WithString("format", mcp.Description("Response format: full, metadata, minimal, raw (default: full)"),
+			mcp.Enum("full", "metadata", "minimal", "raw")),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := req.GetString("id", "")
+		format := req.GetString("format", "full")
+
+		msg, err := proxy.GetMessage(id, format)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(msg)
+	})
+
+	s.AddTool(mcp.NewTool("get_attachment",
+		mcp.WithDescription("Get an email attachment. The parent message must have the allowed label."),
+		mcp.WithString("messageId", mcp.Required(), mcp.Description("Parent message ID")),
+		mcp.WithString("attachmentId", mcp.Required(), mcp.Description("Attachment ID")),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		msgID := req.GetString("messageId", "")
+		attID := req.GetString("attachmentId", "")
+
+		att, err := proxy.GetAttachment(msgID, attID)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(att)
+	})
+
+	s.AddTool(mcp.NewTool("create_draft",
+		mcp.WithDescription("Create an email draft. Does NOT send the email."),
+		mcp.WithArray("to", mcp.Required(), mcp.Description("Recipient email addresses"), mcp.WithStringItems()),
+		mcp.WithString("subject", mcp.Required(), mcp.Description("Email subject")),
+		mcp.WithString("body", mcp.Required(), mcp.Description("Email body (plain text)")),
+		mcp.WithArray("cc", mcp.Description("CC recipients"), mcp.WithStringItems()),
+		mcp.WithArray("bcc", mcp.Description("BCC recipients"), mcp.WithStringItems()),
+		mcp.WithString("inReplyTo", mcp.Description("Message-ID header of the email being replied to")),
+		mcp.WithString("references", mcp.Description("References header for email threading")),
+		mcp.WithString("threadId", mcp.Description("Gmail thread ID to attach the draft to")),
+		mcp.WithDestructiveHintAnnotation(false),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		dr := gmailproxy.DraftRequest{
+			To:         req.GetStringSlice("to", nil),
+			CC:         req.GetStringSlice("cc", nil),
+			BCC:        req.GetStringSlice("bcc", nil),
+			Subject:    req.GetString("subject", ""),
+			Body:       req.GetString("body", ""),
+			InReplyTo:  req.GetString("inReplyTo", ""),
+			References: req.GetString("references", ""),
+			ThreadId:   req.GetString("threadId", ""),
+		}
+
+		result, err := proxy.CreateDraft(dr)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(result)
+	})
+
+	s.AddTool(mcp.NewTool("list_labels",
+		mcp.WithDescription("List all Gmail labels. Useful for discovering label names and IDs."),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		labels, err := proxy.ListLabels()
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(labels)
+	})
 }
 
-func loadConfig() (*config, error) {
-	cfg := &config{
-		GmailTokenJSON: os.Getenv("GMAIL_TOKEN_JSON"),
-		OAuthSecret:    os.Getenv("OAUTH_SECRET"),
-		OAuthClients:   os.Getenv("OAUTH_CLIENTS"),
-		AllowedLabel:   os.Getenv("ALLOWED_LABEL"),
-		Port:           os.Getenv("PORT"),
-	}
+func bearerAuth(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+token {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
-	if cfg.GmailTokenJSON == "" {
-		return nil, fmt.Errorf("GMAIL_TOKEN_JSON is required")
+func toJSONResult(v any) (*mcp.CallToolResult, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encoding result: %w", err)
 	}
-	if cfg.OAuthSecret == "" {
-		return nil, fmt.Errorf("OAUTH_SECRET is required")
-	}
-	if cfg.OAuthClients == "" {
-		return nil, fmt.Errorf("OAUTH_CLIENTS is required")
-	}
-	if cfg.AllowedLabel == "" {
-		return nil, fmt.Errorf("ALLOWED_LABEL is required")
-	}
-	if cfg.Port == "" {
-		cfg.Port = "8080"
-	}
+	return mcp.NewToolResultText(string(data)), nil
+}
 
-	return cfg, nil
+func requireEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("%s is required", key)
+	}
+	return v
 }
