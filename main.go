@@ -140,16 +140,6 @@ func registerTools(s *server.MCPServer, proxy *gmailproxy.Proxy) {
 		return toJSONResult(result)
 	})
 
-	s.AddTool(mcp.NewTool("list_labels",
-		mcp.WithDescription("List all Gmail labels. Useful for discovering label names and IDs."),
-		mcp.WithReadOnlyHintAnnotation(true),
-	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		labels, err := proxy.ListLabels()
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return toJSONResult(labels)
-	})
 }
 
 func bearerAuth(token string, next http.Handler) http.Handler {

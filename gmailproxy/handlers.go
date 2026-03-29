@@ -111,24 +111,6 @@ func (p *Proxy) CreateDraft(req DraftRequest) (*DraftResult, error) {
 	}, nil
 }
 
-type LabelInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-
-func (p *Proxy) ListLabels() ([]LabelInfo, error) {
-	resp, err := p.svc.Users.Labels.List("me").Do()
-	if err != nil {
-		return nil, fmt.Errorf("gmail labels error: %w", err)
-	}
-
-	out := make([]LabelInfo, len(resp.Labels))
-	for i, l := range resp.Labels {
-		out[i] = LabelInfo{ID: l.Id, Name: l.Name, Type: l.Type}
-	}
-	return out, nil
-}
 
 func buildRFC2822(req DraftRequest) string {
 	var b strings.Builder

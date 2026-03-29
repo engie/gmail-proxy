@@ -6,7 +6,6 @@ MCP server that gives AI agents restricted access to a Gmail inbox. Runs as a re
 
 - **Read emails** with a specific label only (label filtered at API level + verified server-side)
 - **Create drafts** (including threaded replies) — no sending, no deleting
-- **List labels** (read-only)
 
 Everything else is blocked — there are no tools for sending, deleting, modifying, or accessing emails outside the allowed label.
 
@@ -75,4 +74,3 @@ Add to your MCP config (e.g. `~/.claude/settings.json`):
 | `get_message` | Get a single email by ID. Rejects messages without the allowed label. |
 | `get_attachment` | Get an attachment. Parent message must have the allowed label. |
 | `create_draft` | Create a draft email. Supports replies via `inReplyTo`, `references`, and `threadId`. |
-| `list_labels` | List all Gmail labels (read-only). |
