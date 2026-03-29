@@ -75,6 +75,7 @@ type DraftRequest struct {
 	BCC        []string `json:"bcc,omitempty"`
 	Subject    string   `json:"subject"`
 	Body       string   `json:"body"`
+	HTMLBody   string   `json:"htmlBody,omitempty"`
 	InReplyTo  string   `json:"inReplyTo,omitempty"`
 	References string   `json:"references,omitempty"`
 	ThreadId   string   `json:"threadId,omitempty"`
@@ -117,6 +118,8 @@ func sanitizeHeader(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }
 
+const mimeBoundary = "----=_Part_gmail_proxy"
+
 func buildRFC2822(req DraftRequest) string {
 	var b strings.Builder
 	sanitized := make([]string, len(req.To))
@@ -145,8 +148,27 @@ func buildRFC2822(req DraftRequest) string {
 	if req.References != "" {
 		fmt.Fprintf(&b, "References: %s\r\n", sanitizeHeader(req.References))
 	}
-	b.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(req.Body)
+	b.WriteString("MIME-Version: 1.0\r\n")
+
+	if req.HTMLBody == "" {
+		b.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		b.WriteString("\r\n")
+		b.WriteString(req.Body)
+	} else {
+		fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", mimeBoundary)
+		b.WriteString("\r\n")
+		fmt.Fprintf(&b, "--%s\r\n", mimeBoundary)
+		b.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		b.WriteString("\r\n")
+		b.WriteString(req.Body)
+		b.WriteString("\r\n")
+		fmt.Fprintf(&b, "--%s\r\n", mimeBoundary)
+		b.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+		b.WriteString("\r\n")
+		b.WriteString(req.HTMLBody)
+		b.WriteString("\r\n")
+		fmt.Fprintf(&b, "--%s--\r\n", mimeBoundary)
+	}
+
 	return b.String()
 }
