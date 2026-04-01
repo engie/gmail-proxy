@@ -11,7 +11,7 @@ Everything else is blocked — there are no tools for sending, deleting, modifyi
 
 ## Security model
 
-- Gmail credentials live on the server only, passed via `GMAIL_TOKEN_JSON` env var
+- Gmail credentials live on the server only, passed via `GMAIL_TOKEN_JSON` or mounted as a file via `GMAIL_TOKEN_FILE`
 - Agents connect over HTTP and authenticate with a static bearer token
 - The agent can only call the 5 defined MCP tools — no access to credentials, no way to escalate
 - Run on a separate machine from the agent to prevent credential access via filesystem/process inspection
@@ -20,10 +20,13 @@ Everything else is blocked — there are no tools for sending, deleting, modifyi
 
 | Variable | Required | Description |
 |---|---|---|
-| `GMAIL_TOKEN_JSON` | Yes | Contents of `token.json` (OAuth refresh token, client ID/secret) |
+| `GMAIL_TOKEN_JSON` | Yes* | Contents of `token.json` (OAuth refresh token, client ID/secret) |
+| `GMAIL_TOKEN_FILE` | Yes* | Path to an injected `token.json` file. Preferred for containers. |
 | `ALLOWED_LABEL` | Yes | Gmail label name to restrict reads to |
 | `MCP_AUTH_TOKEN` | Yes | Bearer token agents must present to authenticate |
 | `PORT` | No | Listen port (default: 8080) |
+
+\* Set one of `GMAIL_TOKEN_JSON` or `GMAIL_TOKEN_FILE`.
 
 ## Setup
 
@@ -47,6 +50,20 @@ export ALLOWED_LABEL="HOUSE"
 export MCP_AUTH_TOKEN="your-secret-token"
 go run .
 ```
+
+Containerized:
+
+```bash
+docker build -t gmail-proxy .
+docker run --rm -p 8080:8080 \
+  -e GMAIL_TOKEN_FILE=/var/run/secrets/token.json \
+  -e ALLOWED_LABEL="HOUSE" \
+  -e MCP_AUTH_TOKEN="your-secret-token" \
+  -v "$(pwd)/token.json:/var/run/secrets/token.json:ro" \
+  gmail-proxy
+```
+
+The container image does not include `token.json`, `client_secret.json`, or the `cmd/reauth` helper.
 
 ### 4. Connect from Claude Code
 

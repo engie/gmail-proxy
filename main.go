@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -14,7 +15,7 @@ import (
 )
 
 func main() {
-	tokenJSON := requireEnv("GMAIL_TOKEN_JSON")
+	tokenJSON := requireTokenJSON()
 	allowedLabel := requireEnv("ALLOWED_LABEL")
 	authToken := requireEnv("MCP_AUTH_TOKEN")
 	port := os.Getenv("PORT")
@@ -169,4 +170,24 @@ func requireEnv(key string) string {
 		log.Fatalf("%s is required", key)
 	}
 	return v
+}
+
+func requireTokenJSON() string {
+	if v := strings.TrimSpace(os.Getenv("GMAIL_TOKEN_JSON")); v != "" {
+		return v
+	}
+
+	path := strings.TrimSpace(os.Getenv("GMAIL_TOKEN_FILE"))
+	if path == "" {
+		log.Fatal("one of GMAIL_TOKEN_JSON or GMAIL_TOKEN_FILE is required")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("reading GMAIL_TOKEN_FILE %q: %v", path, err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		log.Fatalf("GMAIL_TOKEN_FILE %q is empty", path)
+	}
+	return string(data)
 }
