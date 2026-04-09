@@ -60,9 +60,9 @@ func main() {
 }
 
 func registerTools(s *server.MCPServer, proxy *gmailproxy.Proxy) {
-	s.AddTool(mcp.NewTool("list_messages",
-		mcp.WithDescription("List emails that have the allowed label. Returns message IDs and thread IDs; use get_message to fetch full content."),
-		mcp.WithNumber("maxResults", mcp.Description("Max messages to return (1-100, default 20)")),
+	s.AddTool(mcp.NewTool("list_threads",
+		mcp.WithDescription("List email threads that have the allowed label. Returns thread IDs; use get_thread to fetch all messages in a thread."),
+		mcp.WithNumber("maxResults", mcp.Description("Max threads to return (1-100, default 20)")),
 		mcp.WithString("pageToken", mcp.Description("Page token for pagination")),
 		mcp.WithString("q", mcp.Description("Gmail search query to further filter results")),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -71,15 +71,32 @@ func registerTools(s *server.MCPServer, proxy *gmailproxy.Proxy) {
 		pageToken := req.GetString("pageToken", "")
 		query := req.GetString("q", "")
 
-		resp, err := proxy.ListMessages(maxResults, pageToken, query)
+		resp, err := proxy.ListThreads(maxResults, pageToken, query)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return toJSONResult(resp)
 	})
 
+	s.AddTool(mcp.NewTool("get_thread",
+		mcp.WithDescription("Get all messages in an email thread. Only accessible if the thread has the allowed label."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Thread ID")),
+		mcp.WithString("format", mcp.Description("Response format: full, metadata, minimal (default: full)"),
+			mcp.Enum("full", "metadata", "minimal")),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := req.GetString("id", "")
+		format := req.GetString("format", "full")
+
+		thread, err := proxy.GetThread(id, format)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return toJSONResult(thread)
+	})
+
 	s.AddTool(mcp.NewTool("get_message",
-		mcp.WithDescription("Get a single email by ID. Only accessible if the message has the allowed label."),
+		mcp.WithDescription("Get a single email by ID. Accessible if the message belongs to a thread with the allowed label."),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Message ID")),
 		mcp.WithString("format", mcp.Description("Response format: full, metadata, minimal, raw (default: full)"),
 			mcp.Enum("full", "metadata", "minimal", "raw")),
@@ -96,7 +113,7 @@ func registerTools(s *server.MCPServer, proxy *gmailproxy.Proxy) {
 	})
 
 	s.AddTool(mcp.NewTool("get_attachment",
-		mcp.WithDescription("Get an email attachment. The parent message must have the allowed label."),
+		mcp.WithDescription("Get an email attachment. Accessible if the parent message belongs to a thread with the allowed label."),
 		mcp.WithString("messageId", mcp.Required(), mcp.Description("Parent message ID")),
 		mcp.WithString("attachmentId", mcp.Required(), mcp.Description("Attachment ID")),
 		mcp.WithReadOnlyHintAnnotation(true),

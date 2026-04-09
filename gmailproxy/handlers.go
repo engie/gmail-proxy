@@ -17,12 +17,12 @@ func NewProxy(svc *gmail.Service, labelID string) *Proxy {
 	return &Proxy{svc: svc, labelID: labelID}
 }
 
-func (p *Proxy) ListMessages(maxResults int64, pageToken, query string) (*gmail.ListMessagesResponse, error) {
+func (p *Proxy) ListThreads(maxResults int64, pageToken, query string) (*gmail.ListThreadsResponse, error) {
 	if maxResults <= 0 || maxResults > 100 {
 		maxResults = 20
 	}
 
-	call := p.svc.Users.Messages.List("me").LabelIds(p.labelID).MaxResults(maxResults)
+	call := p.svc.Users.Threads.List("me").LabelIds(p.labelID).MaxResults(maxResults)
 	if pageToken != "" {
 		call = call.PageToken(pageToken)
 	}
@@ -31,6 +31,37 @@ func (p *Proxy) ListMessages(maxResults int64, pageToken, query string) (*gmail.
 	}
 
 	return call.Do()
+}
+
+func (p *Proxy) GetThread(id, format string) (*gmail.Thread, error) {
+	if id == "" {
+		return nil, fmt.Errorf("missing thread id")
+	}
+	if format == "" {
+		format = "full"
+	}
+
+	thread, err := p.svc.Users.Threads.Get("me", id).Format(format).Do()
+	if err != nil {
+		return nil, fmt.Errorf("gmail thread get error: %w", err)
+	}
+
+	if !ThreadHasLabel(thread, p.labelID) {
+		return nil, fmt.Errorf("thread not accessible")
+	}
+
+	return thread, nil
+}
+
+func (p *Proxy) threadAccessible(threadID string) error {
+	thread, err := p.svc.Users.Threads.Get("me", threadID).Format("minimal").Do()
+	if err != nil {
+		return fmt.Errorf("gmail thread get error: %w", err)
+	}
+	if !ThreadHasLabel(thread, p.labelID) {
+		return fmt.Errorf("thread not accessible")
+	}
+	return nil
 }
 
 func (p *Proxy) GetMessage(id, format string) (*gmail.Message, error) {
@@ -47,7 +78,9 @@ func (p *Proxy) GetMessage(id, format string) (*gmail.Message, error) {
 	}
 
 	if !HasLabel(msg, p.labelID) {
-		return nil, fmt.Errorf("message not accessible")
+		if err := p.threadAccessible(msg.ThreadId); err != nil {
+			return nil, fmt.Errorf("message not accessible")
+		}
 	}
 
 	return msg, nil
@@ -63,7 +96,9 @@ func (p *Proxy) GetAttachment(msgID, attID string) (*gmail.MessagePartBody, erro
 		return nil, fmt.Errorf("gmail get error: %w", err)
 	}
 	if !HasLabel(msg, p.labelID) {
-		return nil, fmt.Errorf("message not accessible")
+		if err := p.threadAccessible(msg.ThreadId); err != nil {
+			return nil, fmt.Errorf("message not accessible")
+		}
 	}
 
 	return p.svc.Users.Messages.Attachments.Get("me", msgID, attID).Do()
@@ -89,6 +124,12 @@ type DraftResult struct {
 func (p *Proxy) CreateDraft(req DraftRequest) (*DraftResult, error) {
 	if len(req.To) == 0 {
 		return nil, fmt.Errorf("at least one 'to' recipient required")
+	}
+
+	if req.ThreadId != "" {
+		if err := p.threadAccessible(req.ThreadId); err != nil {
+			return nil, fmt.Errorf("thread not accessible for draft")
+		}
 	}
 
 	raw := buildRFC2822(req)

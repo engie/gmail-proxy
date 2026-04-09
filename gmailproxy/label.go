@@ -30,3 +30,13 @@ func HasLabel(msg *gmail.Message, labelID string) bool {
 	}
 	return false
 }
+
+// ThreadHasLabel checks if any message in a thread has the given label ID.
+func ThreadHasLabel(thread *gmail.Thread, labelID string) bool {
+	for _, msg := range thread.Messages {
+		if HasLabel(msg, labelID) {
+			return true
+		}
+	}
+	return false
+}
